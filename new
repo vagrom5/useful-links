@@ -204,3 +204,48 @@ struct AlgFskDet {
     
     double **freq_limits;
 }
+
+
+
+Program received signal SIGSEGV, Segmentation fault.
+0x000000000041ea60 in get_subpulses (sub=0x279f8e0, afd=0x27a0660) at src/core.c:675
+675                 afd->freq_limits[limits_count][0] = freq - freqerr;
+(gdb) bt
+#0  0x000000000041ea60 in get_subpulses (sub=0x279f8e0, afd=0x27a0660) at src/core.c:675
+#1  0x0000000000416025 in open_pulse_db (ctx=0x6b70f8 <xlib+56>, 
+    data=0x2dc5ea8 "\201\177\005\200t", ldata=231424) at src/db.c:1615
+#2  0x00000000004125de in loadpulse (ctx=0x6b70f8 <xlib+56>, 
+    shwpls=0x6bc7c8 <dbtbl+4648>, dbconn=0x26ba390 <dbconn>) at src/db.c:943
+#3  0x0000000000412679 in loadbutton (ctx=0x6b70f8 <xlib+56>, dbconn=0x26ba390 <dbconn>, 
+    dbt=0x6bb5a0 <dbtbl>) at src/db.c:951
+#4  0x000000000041305e in dbgui (ctx=0x6b70f8 <xlib+56>, dbconn=0x26ba390 <dbconn>, 
+    flgdb=0x6bb16e <flgdb>) at src/db.c:1070
+#5  0x0000000000487503 in gui (ctx=0x6b70f8 <xlib+56>) at src/main.c:497
+#6  0x0000000000487647 in mainloop (ctx=0x6b70f8 <xlib+56>) at src/main.c:534
+#7  0x0000000000487b6c in main (argc=2, argv=0x7fffffffe1f8) at src/main.c:653
+(gdb) f 0
+#0  0x000000000041ea60 in get_subpulses (sub=0x279f8e0, afd=0x27a0660) at src/core.c:675
+675                 afd->freq_limits[limits_count][0] = freq - freqerr;
+(gdb) f freq
+#0  0x0000000000000000 in ?? ()
+(gdb) [ freq
+Undefined command: "".  Try "help".
+(gdb) p freq
+No symbol "freq" in current context.
+(gdb) f 0
+#0  0x000000000041ea60 in get_subpulses (sub=0x279f8e0, afd=0x27a0660) at src/core.c:675
+675                 afd->freq_limits[limits_count][0] = freq - freqerr;
+(gdb) p freq
+$1 = 1406.0999999999999
+(gdb) p freqerr
+$2 = 2.5
+(gdb) p limits_count
+$3 = 0
+(gdb) p afd->freq_limits[limits_count][0]
+Cannot access memory at address 0x0
+
+afd->freq_limits = (double**)malloc(2*N*sizeof(double*));
+    afd->freq_limits[0] = (double*)malloc(N*sizeof(double));
+    afd->freq_limits[1] = (double*)malloc(N*sizeof(double));
+
+
