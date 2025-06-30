@@ -197,3 +197,10 @@ void get_subpulses(struct SubPulses* sub, struct AlgFskDet* afd, const PulseData
     fifofree(outfreq_fifo);
     fifofree(derivsm_fifo);
 }
+afd->freq_limits = (double**)malloc(2*N*sizeof(double));
+    afd->freq_limits[0] = (double*)malloc(N*sizeof(double));
+    afd->freq_limits[1] = (double*)malloc(N*sizeof(double));
+struct AlgFskDet {
+    
+    double **freq_limits;
+}
