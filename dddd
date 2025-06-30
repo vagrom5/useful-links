@@ -1,31 +1,29 @@
-void get_subpulses(struct SubPulses* sub, struct AlgFskDet* afd) {
+void get_subpulses(struct SubPulses* sub, struct AlgFskDet* afd, const PulseData* pulse) {
+    // Инициализация и проверки
     afd_setrecinfo(afd);
-    if (pulse->sz <= afd->mindurticks) return;
-
-    const int N = pulse->sz;
+    if (!pulse || pulse->size <= afd->mindurticks) return;
+    
+    const int N = pulse->size;
     double* freqarr = pulse->frequency;
     double* amplarr = pulse->I_samples;
-    const double sampling_freq = record->sampling_freq;
+    const double sampling_freq = afd->recinfo->sampling_freq;
+    const int start_idx = afd->derivsmsz * 2;  // Начальный индекс для обработки
 
-    // Инициализация структур данных
+    // Выделение памяти для временных данных
+    double* outfreq_arr = malloc((N + afd->derivsmsz) * sizeof(double));
+    memset(afd->hist, 0, afd->histsz * sizeof(double));
+
+    // Инициализация FIFO структур
     struct Fifo *outfreq_fifo = fifoinit(afd->derivsmsz * 2, sizeof(double));
     struct Fifo *derivsm_fifo = fifoinit(afd->derivsmsz, sizeof(double));
     struct AdvFifo outfreq_adv;
     advinit(&outfreq_adv, afd->outfreqsmsz);
-    
-    double* outfreq_arr = malloc((N + afd->derivsmsz) * sizeof(double));
-    memset(afd->hist, 0, afd->histsz * sizeof(double));
-    afd->freqrates = malloc(N*sizeof(double));
-    afd->hist = malloc(N*sizeof(double));
-    afd->freq_limits = (double**)malloc(2*sizeof(double*));
-    afd->freq_limits[0] = (double*)malloc(N*sizeof(double));
-    afd->freq_limits[1] = (double*)malloc(N*sizeof(double));
-    
+
     // Первичное заполнение FIFO
     double freq0 = freqarr[0];
     int idx = 1;
-    for (; idx < afd->derivsmsz * 2 && idx < N; idx++) {
-        fifopush(outfreq_fifo);  // Место для нового элемента
+    for (; idx < start_idx && idx < N; idx++) {
+        fifopush(outfreq_fifo);
         *(double*)fifotail(outfreq_fifo) = freqarr[idx];
         
         double deriv = freqarr[idx] - freq0;
@@ -66,8 +64,8 @@ void get_subpulses(struct SubPulses* sub, struct AlgFskDet* afd) {
         advfifopush(&outfreq_adv, outval);
         outfreq_arr[idx] = outfreq_adv.currmean;
         
-        int histidx = round((outfreq_adv.currmean - afd->minfreq) * 10.0);
-        if (histidx >= 0 && histidx < afd->histsz) afd->hist[histidx]++;
+        int histidx = (int)round((outfreq_adv.currmean - afd->minfreq) * 10.0);
+        if (histidx >= 0 && histidx < afd->histsz) afd->hist[histidx] += 1.0;
     }
 
     // Обработка остаточных данных
@@ -79,8 +77,8 @@ void get_subpulses(struct SubPulses* sub, struct AlgFskDet* afd) {
         advfifopush(&outfreq_adv, outval);
         outfreq_arr[N + i] = outfreq_adv.currmean;
         
-        int histidx = round((outfreq_adv.currmean - afd->minfreq) * 10.0);
-        if (histidx >= 0 && histidx < afd->histsz) afd->hist[histidx]++;
+        int histidx = (int)round((outfreq_adv.currmean - afd->minfreq) * 10.0);
+        if (histidx >= 0 && histidx < afd->histsz) afd->hist[histidx] += 1.0;
     }
 
     // Нормализация гистограммы
@@ -98,6 +96,11 @@ void get_subpulses(struct SubPulses* sub, struct AlgFskDet* afd) {
     int limits_count = 0;
     double weigfreqsum = 0.0, weigsum = 0.0;
     int lastfreqidx = -afd->histminkeying;
+    
+    // Выделяем память для частотных диапазонов
+    afd->freq_limits[0] = realloc(afd->freq_limits[0], N * sizeof(double));
+    afd->freq_limits[1] = realloc(afd->freq_limits[1], N * sizeof(double));
+    afd->freqrates = realloc(afd->freqrates, N * sizeof(double));
     
     for (int i = 0; i < afd->histsz; i++) {
         if (afd->hist[i] > 0.0) {
@@ -121,12 +124,13 @@ void get_subpulses(struct SubPulses* sub, struct AlgFskDet* afd) {
         limits_count++;
     }
 
-    // Обнаружение субимпульсов
+    // Обнаружение субимпульсов - КЛЮЧЕВЫЕ ИЗМЕНЕНИЯ
     int durticks = 0;
     double amplsum = 0.0;
     int current_limit = -1;
     
-    for (int i = 0; i < N; i++) {
+    // Начинаем обработку с корректного индекса
+    for (int i = start_idx; i < N; i++) {
         int found = -1;
         for (int j = 0; j < limits_count; j++) {
             if (outfreq_arr[i] >= afd->freq_limits[0][j] && 
@@ -138,11 +142,12 @@ void get_subpulses(struct SubPulses* sub, struct AlgFskDet* afd) {
         
         if (current_limit >= 0) {
             if (found == current_limit) {
-                amplsum += amplarr[i];
+                amplsum += amplarr[i];  // Важно: используем амплитуду из ТЕКУЩЕЙ позиции
                 durticks++;
                 continue;
             }
             
+            // Проверка на выброс
             int is_outlier = 0;
             int end = (i + afd->pausesz < N) ? i + afd->pausesz : N;
             for (int j = i + 1; j < end; j++) {
@@ -158,10 +163,11 @@ void get_subpulses(struct SubPulses* sub, struct AlgFskDet* afd) {
                 durticks++;
                 continue;
             }
-            printf("\ndurticks = %d  afd->mindurticks = %d", durticks, afd->mindurticks);
+            
+            // Завершение субимпульса
             if (durticks >= afd->mindurticks) {
                 if (sub->count >= sub->capacity) {
-                    sub->capacity = (sub->capacity == 0) ? 4 : sub->capacity * 2;
+                    sub->capacity = sub->capacity ? sub->capacity * 2 : 4;
                     sub->freqs = realloc(sub->freqs, sub->capacity * sizeof(double));
                     sub->ampls = realloc(sub->ampls, sub->capacity * sizeof(double));
                     sub->durs = realloc(sub->durs, sub->capacity * sizeof(double));
@@ -169,27 +175,24 @@ void get_subpulses(struct SubPulses* sub, struct AlgFskDet* afd) {
                 sub->freqs[sub->count] = afd->freqrates[current_limit];
                 sub->ampls[sub->count] = AmplConv(amplsum / durticks, amADC, ammV);
                 sub->durs[sub->count] = Sample2Time(durticks, tmMicroSeconds, sampling_freq);
-                
-                printf("\nsub->count = %d\nampls = %lf, freqs = %lf, durs = %lf", sub->ampls[sub->count], sub->freqs[sub->count], sub->durs[sub->count]);
                 sub->count++;
             }
             amplsum = durticks = 0;
+            current_limit = -1;  // Сброс текущего субимпульса
         }
         
+        // Начало нового субимпульса
         if (found >= 0) {
             current_limit = found;
-            amplsum = amplarr[i];
+            amplsum = amplarr[i];  // Начинаем новую сумму
             durticks = 1;
-        } else {
-            current_limit = -1;
         }
     }
     
     // Финализация последнего субимпульса
-    printf("\ncurrent_limit = %d\ndurticks = %d  afd->mindurticks = %d", current_limit, durticks, afd->mindurticks);
     if (current_limit >= 0 && durticks >= afd->mindurticks) {
         if (sub->count >= sub->capacity) {
-            sub->capacity = (sub->capacity == 0) ? 4 : sub->capacity * 2;
+            sub->capacity = sub->capacity ? sub->capacity * 2 : 4;
             sub->freqs = realloc(sub->freqs, sub->capacity * sizeof(double));
             sub->ampls = realloc(sub->ampls, sub->capacity * sizeof(double));
             sub->durs = realloc(sub->durs, sub->capacity * sizeof(double));
@@ -197,8 +200,6 @@ void get_subpulses(struct SubPulses* sub, struct AlgFskDet* afd) {
         sub->freqs[sub->count] = afd->freqrates[current_limit];
         sub->ampls[sub->count] = AmplConv(amplsum / durticks, amADC, ammV);
         sub->durs[sub->count] = Sample2Time(durticks, tmMicroSeconds, sampling_freq);
-        
-        printf("\nsub->count = %d\nampls = %lf, freqs = %lf, durs = %lf", sub->ampls[sub->count], sub->freqs[sub->count], sub->durs[sub->count]);
         sub->count++;
     }
 
