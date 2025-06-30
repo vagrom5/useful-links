@@ -1,0 +1,209 @@
+void get_subpulses(struct SubPulses* sub, struct AlgFskDet* afd) {
+    afd_setrecinfo(afd);
+    if (pulse->sz <= afd->mindurticks) return;
+
+    const int N = pulse->sz;
+    double* freqarr = pulse->frequency;
+    double* amplarr = pulse->I_samples;
+    const double sampling_freq = record->sampling_freq;
+
+    // Инициализация структур данных
+    struct Fifo *outfreq_fifo = fifoinit(afd->derivsmsz * 2, sizeof(double));
+    struct Fifo *derivsm_fifo = fifoinit(afd->derivsmsz, sizeof(double));
+    struct AdvFifo outfreq_adv;
+    advinit(&outfreq_adv, afd->outfreqsmsz);
+    
+    double* outfreq_arr = malloc((N + afd->derivsmsz) * sizeof(double));
+    memset(afd->hist, 0, afd->histsz * sizeof(double));
+    afd->freqrates = malloc(N*sizeof(double));
+    afd->hist = malloc(N*sizeof(double));
+    afd->freq_limits = (double**)malloc(2*sizeof(double*));
+    afd->freq_limits[0] = (double*)malloc(N*sizeof(double));
+    afd->freq_limits[1] = (double*)malloc(N*sizeof(double));
+    
+    // Первичное заполнение FIFO
+    double freq0 = freqarr[0];
+    int idx = 1;
+    for (; idx < afd->derivsmsz * 2 && idx < N; idx++) {
+        fifopush(outfreq_fifo);  // Место для нового элемента
+        *(double*)fifotail(outfreq_fifo) = freqarr[idx];
+        
+        double deriv = freqarr[idx] - freq0;
+        freq0 = freqarr[idx];
+        
+        if (fifosize(derivsm_fifo) >= afd->derivsmsz) {
+            fifopop(derivsm_fifo);
+        }
+        fifopush(derivsm_fifo);
+        *(double*)fifotail(derivsm_fifo) = deriv;
+    }
+
+    // Основная обработка сигнала
+    int curjumpext = 0;
+    double jumpfreq = 0.0;
+    for (; idx < N; idx++) {
+        fifopush(outfreq_fifo);
+        *(double*)fifotail(outfreq_fifo) = freqarr[idx];
+        
+        double deriv = freqarr[idx] - freq0;
+        freq0 = freqarr[idx];
+        
+        double deriv_front = fifohead(derivsm_fifo) ? *(double*)fifohead(derivsm_fifo) : 0.0;
+        fifopop(derivsm_fifo);
+        
+        fifopush(derivsm_fifo);
+        *(double*)fifotail(derivsm_fifo) = deriv;
+        
+        if (deriv * deriv_front <= afd->phjumpthr) {
+            curjumpext = afd->phjumpsz;
+            if (jumpfreq == 0.0 && fifohead(outfreq_fifo)) {
+                jumpfreq = *(double*)fifohead(outfreq_fifo);
+            }
+        }
+        
+        double outval = (curjumpext-- > 0) ? jumpfreq : 
+                      (fifohead(outfreq_fifo) ? *(double*)fifohead(outfreq_fifo) : 0.0);
+        advfifopush(&outfreq_adv, outval);
+        outfreq_arr[idx] = outfreq_adv.currmean;
+        
+        int histidx = round((outfreq_adv.currmean - afd->minfreq) * 10.0);
+        if (histidx >= 0 && histidx < afd->histsz) afd->hist[histidx]++;
+    }
+
+    // Обработка остаточных данных
+    for (int i = 0; i < afd->derivsmsz; i++) {
+        double outval = (curjumpext-- > 0) ? jumpfreq : 
+                      (fifohead(outfreq_fifo) ? *(double*)fifohead(outfreq_fifo) : 0.0);
+        fifopop(outfreq_fifo);
+        
+        advfifopush(&outfreq_adv, outval);
+        outfreq_arr[N + i] = outfreq_adv.currmean;
+        
+        int histidx = round((outfreq_adv.currmean - afd->minfreq) * 10.0);
+        if (histidx >= 0 && histidx < afd->histsz) afd->hist[histidx]++;
+    }
+
+    // Нормализация гистограммы
+    double histmax = 0.0;
+    for (int i = 0; i < afd->histsz; i++) {
+        if (afd->hist[i] > histmax) histmax = afd->hist[i];
+    }
+    for (int i = 0; i < afd->histsz; i++) {
+        afd->hist[i] /= histmax;
+        if (afd->hist[i] < afd->histthr) afd->hist[i] = 0.0;
+    }
+
+    // Определение частотных диапазонов
+    double freqerr = afd->histminkeying / 4.0;
+    int limits_count = 0;
+    double weigfreqsum = 0.0, weigsum = 0.0;
+    int lastfreqidx = -afd->histminkeying;
+    
+    for (int i = 0; i < afd->histsz; i++) {
+        if (afd->hist[i] > 0.0) {
+            weigfreqsum += i * afd->hist[i];
+            weigsum += afd->hist[i];
+            lastfreqidx = i;
+        } else if (i - lastfreqidx >= afd->histminkeying && weigsum > 0.0) {
+            double freq = afd->minfreq + weigfreqsum / (weigsum * 10.0);
+            afd->freqrates[limits_count] = freq;
+            afd->freq_limits[0][limits_count] = freq - freqerr;
+            afd->freq_limits[1][limits_count] = freq + freqerr;
+            limits_count++;
+            weigfreqsum = weigsum = 0.0;
+        }
+    }
+    if (weigsum > 0.0) {
+        double freq = afd->minfreq + weigfreqsum / (weigsum * 10.0);
+        afd->freqrates[limits_count] = freq;
+        afd->freq_limits[0][limits_count] = freq - freqerr;
+        afd->freq_limits[1][limits_count] = freq + freqerr;
+        limits_count++;
+    }
+
+    // Обнаружение субимпульсов
+    int durticks = 0;
+    double amplsum = 0.0;
+    int current_limit = -1;
+    
+    for (int i = 0; i < N; i++) {
+        int found = -1;
+        for (int j = 0; j < limits_count; j++) {
+            if (outfreq_arr[i] >= afd->freq_limits[0][j] && 
+                outfreq_arr[i] <= afd->freq_limits[1][j]) {
+                found = j;
+                break;
+            }
+        }
+        
+        if (current_limit >= 0) {
+            if (found == current_limit) {
+                amplsum += amplarr[i];
+                durticks++;
+                continue;
+            }
+            
+            int is_outlier = 0;
+            int end = (i + afd->pausesz < N) ? i + afd->pausesz : N;
+            for (int j = i + 1; j < end; j++) {
+                if (outfreq_arr[j] >= afd->freq_limits[0][current_limit] && 
+                    outfreq_arr[j] <= afd->freq_limits[1][current_limit]) {
+                    is_outlier = 1;
+                    break;
+                }
+            }
+            
+            if (is_outlier) {
+                amplsum += amplarr[i];
+                durticks++;
+                continue;
+            }
+            printf("\ndurticks = %d  afd->mindurticks = %d", durticks, afd->mindurticks);
+            if (durticks >= afd->mindurticks) {
+                if (sub->count >= sub->capacity) {
+                    sub->capacity = (sub->capacity == 0) ? 4 : sub->capacity * 2;
+                    sub->freqs = realloc(sub->freqs, sub->capacity * sizeof(double));
+                    sub->ampls = realloc(sub->ampls, sub->capacity * sizeof(double));
+                    sub->durs = realloc(sub->durs, sub->capacity * sizeof(double));
+                }
+                sub->freqs[sub->count] = afd->freqrates[current_limit];
+                sub->ampls[sub->count] = AmplConv(amplsum / durticks, amADC, ammV);
+                sub->durs[sub->count] = Sample2Time(durticks, tmMicroSeconds, sampling_freq);
+                
+                printf("\nsub->count = %d\nampls = %lf, freqs = %lf, durs = %lf", sub->ampls[sub->count], sub->freqs[sub->count], sub->durs[sub->count]);
+                sub->count++;
+            }
+            amplsum = durticks = 0;
+        }
+        
+        if (found >= 0) {
+            current_limit = found;
+            amplsum = amplarr[i];
+            durticks = 1;
+        } else {
+            current_limit = -1;
+        }
+    }
+    
+    // Финализация последнего субимпульса
+    printf("\ncurrent_limit = %d\ndurticks = %d  afd->mindurticks = %d", current_limit, durticks, afd->mindurticks);
+    if (current_limit >= 0 && durticks >= afd->mindurticks) {
+        if (sub->count >= sub->capacity) {
+            sub->capacity = (sub->capacity == 0) ? 4 : sub->capacity * 2;
+            sub->freqs = realloc(sub->freqs, sub->capacity * sizeof(double));
+            sub->ampls = realloc(sub->ampls, sub->capacity * sizeof(double));
+            sub->durs = realloc(sub->durs, sub->capacity * sizeof(double));
+        }
+        sub->freqs[sub->count] = afd->freqrates[current_limit];
+        sub->ampls[sub->count] = AmplConv(amplsum / durticks, amADC, ammV);
+        sub->durs[sub->count] = Sample2Time(durticks, tmMicroSeconds, sampling_freq);
+        
+        printf("\nsub->count = %d\nampls = %lf, freqs = %lf, durs = %lf", sub->ampls[sub->count], sub->freqs[sub->count], sub->durs[sub->count]);
+        sub->count++;
+    }
+
+    // Освобождение ресурсов
+    free(outfreq_arr);
+    fifofree(outfreq_fifo);
+    fifofree(derivsm_fifo);
+}
