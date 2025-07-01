@@ -1,0 +1,331 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <math.h>
+
+#define TRACEALL 0
+#define qdbgl(level, msg) if (level <= TRACEALL) printf("%s\n", msg)
+
+struct Fifo {
+    void *begin;
+    void *end;
+    void *head;
+    void *tail;
+    size_t elemsize;
+};
+
+struct AdvFifo {
+    double alpha;
+    double currmean;
+    double prev_currmean;
+};
+
+struct SubPulses {
+    double *freqs;
+    double *ampls;
+    double *durs;
+    int count;
+};
+
+struct AlgFskDet {
+    int derivsmsz;
+    int phjumpsz;
+    int outfreqsmsz;
+    double phjumpthr;
+    double histthr;
+    double histminkeying;
+    int pausesz;
+    int mindurticks;
+    double minfreq;
+    double *hist;
+    int histsz;
+};
+
+struct RecInfo {
+    double sampling_freq;
+};
+
+struct AlgFskDet *afd;
+struct RecInfo *recinfo;
+
+double Sample2Time(int samples, int unit, double sampling_freq) {
+    // Реализация этой функции должна быть предоставлена
+    return 0.0;
+}
+
+double AmplConv(double ampl, int from, int to) {
+    // Реализация этой функции должна быть предоставлена
+    return ampl;
+}
+
+struct SubPulses GetSubpulses(double *freqarr, int freqarr_size, double *amplarr, int amplarr_size) {
+    qdbgl(TRACEALL, "GetSubpulses begin()");
+    
+    struct SubPulses sub;
+    sub.count = 0;
+    sub.freqs = NULL;
+    sub.ampls = NULL;
+    sub.durs = NULL;
+    
+    if (freqarr_size <= afd->mindurticks) {
+        qdbgl(TRACEALL, "Short impulse, returning empty");
+        return sub;
+    }
+
+    // Сглаживание по выходной частоте
+    struct AdvFifo outfreq_fifo;
+    advinit(&outfreq_fifo, afd->outfreqsmsz);
+    
+    double *outfreq_arr = malloc(freqarr_size * sizeof(double));
+    if (!outfreq_arr) {
+        return sub;
+    }
+    
+    qdbgl(TRACEALL, "Deriv first point.");
+    
+    // Получает первую точку сглаженной производной
+    double *freqit = freqarr + 1;
+    double freq0 = freqarr[0];
+    
+    // Используем FIFO для производной и частоты
+    struct Fifo *derivsm_que = fifoinit(afd->derivsmsz * 2, sizeof(double));
+    struct Fifo *outfreq_que = fifoinit(afd->derivsmsz * 2, sizeof(double));
+    
+    for (int idx = 0; idx < afd->derivsmsz * 2; ++idx, ++freqit) {
+        double *outfreq = fifopush(outfreq_que);
+        *outfreq = *freqit;
+        
+        double deriv = *freqit - freq0;
+        double *deriv_ptr = fifopush(derivsm_que);
+        *deriv_ptr = deriv;
+        
+        if (idx >= afd->derivsmsz) {
+            fifopop(derivsm_que);
+        }
+        freq0 = *freqit;
+    }
+
+    // Считает производную, сглаживает, обнаруживает скачки
+    qdbgl(TRACEALL, "Hist.");
+    int curjumpext = 0;
+    memset(afd->hist, 0, afd->histsz * sizeof(double));
+    double jumpfreq = 0.0;
+    int outfreq_idx = 0;
+    
+    for (; freqit != freqarr + freqarr_size; ++freqit, ++outfreq_idx) {
+        double *outfreq = fifopush(outfreq_que);
+        *outfreq = *freqit;
+        
+        double deriv = *freqit - freq0;
+        freq0 = *freqit;
+        
+        double *old_deriv = fifopeek(derivsm_que);
+        double derivmult = deriv * (*old_deriv);
+        fifopop(derivsm_que);
+        double *new_deriv = fifopush(derivsm_que);
+        *new_deriv = deriv;
+        
+        if (derivmult <= afd->phjumpthr) {
+            curjumpext = afd->phjumpsz;
+            if (jumpfreq == 0.0) {
+                double *first = fifopeek(outfreq_que);
+                jumpfreq = *first;
+            }
+        }
+        
+        // Частота без фазового скачка
+        if (curjumpext-- > 0) {
+            advfifopush(&outfreq_fifo, jumpfreq);
+        } else {
+            double *first = fifopeek(outfreq_que);
+            advfifopush(&outfreq_fifo, *first);
+            jumpfreq = 0.0;
+        }
+        fifopop(outfreq_que);
+        
+        outfreq_arr[outfreq_idx] = outfreq_fifo.currmean;
+        
+        // Гистограмма
+        int histidx = round((outfreq_fifo.currmean - afd->minfreq) * 10.0);
+        if (histidx >= 0 && histidx < afd->histsz) {
+            afd->hist[histidx] += 1.0;
+        }
+    }
+    
+    // Дописывает остатки мгновенной частоты
+    for (int idx = 0; idx < afd->derivsmsz; ++idx, ++outfreq_idx) {
+        if (curjumpext--) {
+            advfifopush(&outfreq_fifo, jumpfreq);
+        } else {
+            double *first = fifopeek(outfreq_que);
+            advfifopush(&outfreq_fifo, *first);
+        }
+        fifopop(outfreq_que);
+        
+        outfreq_arr[outfreq_idx] = outfreq_fifo.currmean;
+        
+        int histidx = round((outfreq_fifo.currmean - afd->minfreq) * 10.0);
+        if (histidx >= 0 && histidx < afd->histsz) {
+            afd->hist[histidx] += 1.0;
+        }
+    }
+    
+    fifofree(derivsm_que);
+    fifofree(outfreq_que);
+    
+    // Находит максимум гистограммы
+    qdbgl(TRACEALL, "Histmax.");
+    double histmax = 0.0;
+    for (int idx = 0; idx < afd->histsz; ++idx) {
+        if (afd->hist[idx] > histmax) {
+            histmax = afd->hist[idx];
+        }
+    }
+    
+    // Нормирует гистограмму
+    for (int idx = 0; idx < afd->histsz; ++idx) {
+        afd->hist[idx] /= histmax;
+        if (afd->hist[idx] < afd->histthr) {
+            afd->hist[idx] = 0.0;
+        }
+    }
+    
+    // Определяет номинальные частоты
+    qdbgl(TRACEALL, "Freqrates.");
+    double weigfreqsum = 0.0;
+    double weigsum = 0.0;
+    int lastfreqidx = 0;
+    
+    // Временные массивы для частот и их пределов
+    double *freqrates = NULL;
+    double *freqlimits_low = NULL;
+    double *freqlimits_high = NULL;
+    int freqrates_count = 0;
+    
+    double freqerr = afd->histminkeying / 4.0;
+    
+    for (int idx = 0; idx < afd->histsz; ++idx) {
+        if (afd->hist[idx] > 0.0) {
+            weigfreqsum += idx * afd->hist[idx];
+            weigsum += afd->hist[idx];
+            lastfreqidx = idx;
+        } else if (idx - lastfreqidx >= afd->histminkeying && weigsum > 0.0) {
+            double freq = afd->minfreq + weigfreqsum / (weigsum * 10.0);
+            
+            freqrates = realloc(freqrates, (freqrates_count + 1) * sizeof(double));
+            freqlimits_low = realloc(freqlimits_low, (freqrates_count + 1) * sizeof(double));
+            freqlimits_high = realloc(freqlimits_high, (freqrates_count + 1) * sizeof(double));
+            
+            freqrates[freqrates_count] = freq;
+            freqlimits_low[freqrates_count] = freq - freqerr;
+            freqlimits_high[freqrates_count] = freq + freqerr;
+            freqrates_count++;
+            
+            weigfreqsum = 0.0;
+            weigsum = 0.0;
+        }
+    }
+    
+    if (weigsum > 0.0) {
+        double freq = afd->minfreq + weigfreqsum / (weigsum * 10.0);
+        
+        freqrates = realloc(freqrates, (freqrates_count + 1) * sizeof(double));
+        freqlimits_low = realloc(freqlimits_low, (freqrates_count + 1) * sizeof(double));
+        freqlimits_high = realloc(freqlimits_high, (freqrates_count + 1) * sizeof(double));
+        
+        freqrates[freqrates_count] = freq;
+        freqlimits_low[freqrates_count] = freq - freqerr;
+        freqlimits_high[freqrates_count] = freq + freqerr;
+        freqrates_count++;
+    }
+    
+    // Обнаруживает субимпульсы
+    qdbgl(TRACEALL, "Subpulses.");
+    freqit = outfreq_arr;
+    double *amplit = amplarr;
+    int durticks = 0;
+    double amplsum = 0.0;
+    int current_limit = -1;
+    
+    for (int i = 0; i < outfreq_idx; ++i, ++freqit, ++amplit) {
+        int found_limit = -1;
+        
+        // Проверяем, попадает ли текущая частота в какой-либо из диапазонов
+        for (int j = 0; j < freqrates_count; ++j) {
+            if (*freqit >= freqlimits_low[j] && *freqit <= freqlimits_high[j]) {
+                found_limit = j;
+                break;
+            }
+        }
+        
+        if (current_limit != -1) {
+            // Начало субимпульса было найдено ранее
+            if (found_limit == current_limit) {
+                // Субимпульс продолжается
+                amplsum += *amplit;
+                durticks++;
+                continue;
+            } else {
+                // Проверяем, выброс это или конец субимпульса
+                int is_pause = 1;
+                int pause_end = (i + afd->pausesz < outfreq_idx) ? i + afd->pausesz : outfreq_idx;
+                
+                for (int k = i + 1; k < pause_end; ++k) {
+                    if (outfreq_arr[k] >= freqlimits_low[current_limit] && 
+                        outfreq_arr[k] <= freqlimits_high[current_limit]) {
+                        is_pause = 0;
+                        break;
+                    }
+                }
+                
+                if (!is_pause) {
+                    // Выброс, субимпульс продолжается
+                    amplsum += *amplit;
+                    durticks++;
+                    continue;
+                } else {
+                    // Субимпульс закончился
+                    if (durticks >= afd->mindurticks) {
+                        sub.freqs = realloc(sub.freqs, (sub.count + 1) * sizeof(double));
+                        sub.ampls = realloc(sub.ampls, (sub.count + 1) * sizeof(double));
+                        sub.durs = realloc(sub.durs, (sub.count + 1) * sizeof(double));
+                        
+                        sub.freqs[sub.count] = freqrates[current_limit];
+                        sub.ampls[sub.count] = AmplConv(amplsum / durticks, 0, 0); // Заменить на правильные константы
+                        sub.durs[sub.count] = Sample2Time(durticks, 0, recinfo->sampling_freq); // Заменить на правильную константу
+                        sub.count++;
+                    }
+                    amplsum = 0.0;
+                    durticks = 0;
+                    current_limit = -1;
+                }
+            }
+        }
+        
+        if (found_limit != -1) {
+            current_limit = found_limit;
+            amplsum += *amplit;
+            durticks++;
+        }
+    }
+    
+    // Обработка последнего субимпульса
+    if (durticks >= afd->mindurticks && current_limit != -1) {
+        sub.freqs = realloc(sub.freqs, (sub.count + 1) * sizeof(double));
+        sub.ampls = realloc(sub.ampls, (sub.count + 1) * sizeof(double));
+        sub.durs = realloc(sub.durs, (sub.count + 1) * sizeof(double));
+        
+        sub.freqs[sub.count] = freqrates[current_limit];
+        sub.ampls[sub.count] = AmplConv(amplsum / durticks, 0, 0); // Заменить на правильные константы
+        sub.durs[sub.count] = Sample2Time(durticks, 0, recinfo->sampling_freq); // Заменить на правильную константу
+        sub.count++;
+    }
+    
+    free(outfreq_arr);
+    free(freqrates);
+    free(freqlimits_low);
+    free(freqlimits_high);
+    
+    qdbgl(TRACEALL, "GetSubpulses end()");
+    return sub;
+}
