@@ -1,23 +1,32 @@
-double *old_deriv = fifopeek(derivsm_que);
-        if(!old_deriv) old_deriv = 0;
-        double derivmult = deriv * (*old_deriv);
-
-Program received signal SIGSEGV, Segmentation fault.
-0x000000000041e3b8 in get_subpulses (sub=0x27a06b0, afd=0x27a0810) at src/core.c:642
-642             if(!*old_deriv) old_deriv = 0;
-(gdb) bt 
-#0  0x000000000041e3b8 in get_subpulses (sub=0x27a06b0, afd=0x27a0810) at src/core.c:642
-#1  0x000000000041601a in open_pulse_db (ctx=0x6b80f8 <xlib+56>, 
-    data=0x7fffd035f010 "\203", ldata=31936512) at src/db.c:1591
-#2  0x000000000041275b in loadbutton (ctx=0x6b80f8 <xlib+56>, dbconn=0x26bb390 <dbconn>, 
-    dbt=0x6bc5a0 <dbtbl>) at src/db.c:962
-#3  0x000000000041305e in dbgui (ctx=0x6b80f8 <xlib+56>, dbconn=0x26bb390 <dbconn>, 
-    flgdb=0x6bc16e <flgdb>) at src/db.c:1070
-#4  0x000000000048755f in gui (ctx=0x6b80f8 <xlib+56>) at src/main.c:497
-#5  0x00000000004876a3 in mainloop (ctx=0x6b80f8 <xlib+56>) at src/main.c:534
-#6  0x0000000000487bc8 in main (argc=2, argv=0x7fffffffe1f8) at src/main.c:653
-(gdb) f 0
-#0  0x000000000041e3b8 in get_subpulses (sub=0x27a06b0, afd=0x27a0810) at src/core.c:642
-642             if(!*old_deriv) old_deriv = 0;
-(gdb) p *old_deriv
-Cannot access memory at address 0x0
+for (int idx = 0; idx < afd->derivsmsz * 2 && freqit < freqarr + freqarr_size; ++idx, ++freqit) {
+    // Добавление в очередь частот
+    double *outfreq = fifopush(outfreq_que);
+    if (!outfreq) {
+        // Если очередь переполнена, увеличиваем её
+        printf("Увеличиваем очередь outfreq_que\n");
+        struct Fifo *new_que = fifoinit(outfreq_que->size * 2, sizeof(double));
+        // Переносим данные...
+        fifofree(outfreq_que);
+        outfreq_que = new_que;
+        outfreq = fifopush(outfreq_que);
+    }
+    *outfreq = *freqit;
+    
+    // Аналогично для производных
+    double deriv = *freqit - freq0;
+    double *deriv_ptr = fifopush(derivsm_que);
+    if (!deriv_ptr) {
+        printf("Увеличиваем очередь derivsm_que\n");
+        struct Fifo *new_que = fifoinit(derivsm_que->size * 2, sizeof(double));
+        // Переносим данные...
+        fifofree(derivsm_que);
+        derivsm_que = new_que;
+        deriv_ptr = fifopush(derivsm_que);
+    }
+    *deriv_ptr = deriv;
+    
+    if (idx >= afd->derivsmsz) {
+        fifopop(derivsm_que); // Удаляем старый элемент
+    }
+    freq0 = *freqit;
+}
