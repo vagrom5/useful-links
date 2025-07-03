@@ -49,3 +49,44 @@ int main() {
     free(buffer);
     return 0;
 }
+
+
+
+Program received signal SIGSEGV, Segmentation fault.
+_IO_vsnprintf (string=0x0, maxlen=<optimized out>, format=0x4a743c "%.15g", 
+    args=args@entry=0x7fffffffd8d8) at vsnprintf.c:112
+112     vsnprintf.c: Нет такого файла или каталога.
+(gdb) bt
+#0  _IO_vsnprintf (string=0x0, maxlen=<optimized out>, format=0x4a743c "%.15g", 
+    args=args@entry=0x7fffffffd8d8) at vsnprintf.c:112
+#1  0x00007ffff6aac2c2 in __snprintf (s=<optimized out>, maxlen=<optimized out>, 
+    format=<optimized out>) at snprintf.c:33
+#2  0x000000000041e17b in double_array_to_string (arr=0x2d52a00, length=1, buffer=0x0, 
+    buffer_size=25) at src/core.c:569
+#3  0x000000000040b414 in pulse_table (ctx=0x6b80f8 <xlib+56>) at src/tables.c:278
+#4  0x00000000004875be in gui (ctx=0x6b80f8 <xlib+56>) at src/main.c:477
+#5  0x0000000000487804 in mainloop (ctx=0x6b80f8 <xlib+56>) at src/main.c:534
+#6  0x0000000000487d29 in main (argc=2, argv=0x7fffffffe1f8) at src/main.c:653
+(gdb) f 2
+#2  0x000000000041e17b in double_array_to_string (arr=0x2d52a00, length=1, buffer=0x0, 
+    buffer_size=25) at src/core.c:569
+569             int written = snprintf(buffer + pos, buffer_size - pos, "%.15g", arr[i]);
+(gdb) p buffer
+$1 = 0x0
+(gdb) p pos
+$2 = 0
+(gdb) p buffer_size
+$3 = 25
+(gdb) p arr[i]
+$4 = 815.61053240740739
+(gdb) f 3
+#3  0x000000000040b414 in pulse_table (ctx=0x6b80f8 <xlib+56>) at src/tables.c:278
+278                 double_array_to_string(sub->ampls, count, buffer_fsk, fsk_sz);
+(gdb) p count
+$5 = 1
+(gdb) p fsk_sz
+$6 = 25
+(gdb) p buffer_fsk
+$7 = 0x0
+(gdb) p sub->ampls
+$8 = (double *) 0x2d52a00
