@@ -2,26 +2,40 @@
 #include <string.h>
 #include <stdlib.h>
 
-void array_to_string(double* arr, int length, char* buffer, int buffer_size) {
+void double_array_to_string(double* arr, int length, char* buffer, int buffer_size) {
+    if (!buffer || buffer_size <= 0) {
+        fprintf(stderr, "Ошибка: буфер NULL или размер <= 0\n");
+        return;
+    }
+
     int pos = 0;
+    buffer[0] = '\0';  // Начинаем с пустой строки
+
     for (int i = 0; i < length; i++) {
-        // Преобразуем текущий double в строку
+        // Записываем текущее число в буфер
         int written = snprintf(buffer + pos, buffer_size - pos, "%.15g", arr[i]);
         
-        // Проверяем, не вышли ли за пределы буфера
-        if (written < 0 || written >= buffer_size - pos) {
-            // Буфер переполнен, можно обработать ошибку
+        if (written < 0) {
+            fprintf(stderr, "Ошибка форматирования\n");
             break;
         }
+        
         pos += written;
         
-        // Добавляем запятую, если это не последний элемент
+        // Проверяем, не вышли ли за границы буфера
+        if (pos >= buffer_size) {
+            fprintf(stderr, "Буфер переполнен\n");
+            break;
+        }
+
+        // Добавляем запятую (если не последний элемент)
         if (i < length - 1) {
             if (pos + 1 < buffer_size) {
                 buffer[pos++] = ',';
-                buffer[pos] = '\0'; // Всегда поддерживаем нуль-терминатор
+                buffer[pos] = '\0';  // Не забываем про нуль-терминатор
             } else {
-                break; // Не хватает места для запятой
+                fprintf(stderr, "Не хватает места для запятой\n");
+                break;
             }
         }
     }
