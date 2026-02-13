@@ -1,0 +1,461 @@
+#include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
+#include <stdbool.h>
+#include <math.h>
+#include "error.h"
+#include "log.h"
+#include "pool.h"
+#include "hist.h"
+
+#define MAX(a, b) ((a) > (b) ? (a) : (b))
+
+//параметры настройки
+//[100, 30000] мкс
+
+//  задаются оператором
+#define MINPSI 100  // мин пси
+#define MAXPSI 30000 // макс пси
+#define VOBUL 0.15  // вобуляция
+#define Z_0 0.4
+// коэффициенты порога
+#define ALPHA 0.3   // "по времени наблюдения"
+#define BETA 0.15  // против субгармоник
+#define GAMMA 3.0  // против шума
+
+// #define MINSTEP 20
+// #define MAXCOUNTPSI 2
+
+#define PI 3.14159265
+
+// test
+#define PSI1 300
+#define PSI2 500
+#define PSI3 900
+#define PULSEDETECTCOUNT 100
+
+struct psi {
+    int *toain;
+    int toacount;
+};
+
+struct coefs {
+    float alpha, beta, gamma;
+};
+
+struct pri_pars {
+    int n, m, k, N, K_k, tau, tau_min, tau_max, T;
+    int *t; // TOA
+    double *D; //спектр ПCИ
+    int *c; // кол-во импульсов с конкретным TOA
+    int *o; // окно смещения
+    float *b; // ширина к-го бина
+};
+
+void pri_1_step_3(struct pri_pars *pp);
+void pri_1_step_2(struct pri_pars *pp);
+void pri_2_step_3(struct pri_pars *pp);
+void pri_2_step_2(struct pri_pars *pp);
+
+int f = 0;
+
+struct psi *psialloc(struct pool *pool, int psicount)
+{
+    struct psi *psi = poolnew(pool, struct psi, 1);
+    if (psi) {
+        psi->toacount = psicount;
+        psi->toain = poolnew(pool, int, psicount);
+        if (psi->toain)
+            return psi;
+        else
+            return NULL;
+    }
+    else
+        return NULL;
+}
+
+// на 2 пси
+void mvpgen(struct psi *psi)
+{
+    int *toain = psi->toain;
+    int i = 1, j = 1, k = 1;
+    printf("\ntoa:\n");
+    for (int n = 0; n < psi->toacount; n++) {
+        if (i*PSI1 < j*PSI2) {
+            toain[n] = i*PSI1;
+            i++;
+        } else {
+            toain[n] = j*PSI2;
+            j++;
+        }
+        printf("%d    ", toain[n]);
+    }
+    printf("\n");
+}
+
+// на 3 пси
+// void mvpgen(struct psi *psi)
+// {
+//     int *toain = psi->toain;
+//     int i = 1, j = 1, k = 1;
+//     printf("\ntoa:\n");
+//     for (int n = 0; n < psi->toacount; n++) {
+//         int val1 = i * PSI1;
+//         int val2 = j * PSI2;
+//         int val3 = k * PSI3;
+//
+//         if (val1 <= val2 && val1 <= val3) {
+//             toain[n] = val1;
+//             i++;
+//         } else if (val2 <= val1 && val2 <= val3) {
+//             toain[n] = val2;
+//             j++;
+//         } else {
+//             toain[n] = val3;
+//             k++;
+//         }
+//         printf("%d    ", toain[n]);
+//     }
+//     printf("\n");
+// }
+
+
+void thresholds(struct pri_pars *pp, int *psis, struct coefs *coefs)
+{
+    int l = 0;
+    FILE *hist = fopen("hist_res.txt", "w");
+    FILE *thr = fopen("thr_res.txt", "w");
+
+    if(hist == NULL || thr == NULL)
+        printf("\nОшибка открытия файла записи");
+
+    for (int k = 1; k < pp->K_k; k++) {
+
+        double tau_k = (k - 0.5) / pp->K_k * (pp->tau_max - pp->tau_min) + pp->tau_min;
+        // printf("\n\ntau_k = %lf   k = %d  pp->K_k = %d\ntau_max = %d    tau_min = %d", tau_k, k, pp->K_k, pp->tau_max, pp->tau_min);
+        // printf("\npp->t_max = %d    pp->c = %d\nN = %d  pp->b = %d", pp->t_max, pp->c[k], pp->N, pp->b[k]);
+
+        double a = MAX(coefs->alpha * pp->T / tau_k, MAX(coefs->beta * pp->c[k], coefs->gamma * sqrt(pp->N * pp->N * pp->b[k] / pp->T)));
+
+        if(isnan(a)) {
+            a = 0;
+        }
+
+        fprintf(hist,"%lf\n" , pp->D[k]);
+        fflush(hist);
+        fprintf(thr,"%lf\n" , a);
+        fflush(thr);
+
+        // printf("\nD[%d] = %lf   a = %lf     tau_k = %lf", k, pp->D[k], a, tau_k);
+
+        if(pp->D[k] > a) {
+            psis[l] = tau_k;
+            printf("\nППИ %d = %d   D[%d] = %lf     a = %lf", l, psis[l], k, pp->D[k], a);
+            // printf("\n%lf   %lf     %lf", coefs->alpha * pp->tau_max / tau_k, coefs->beta * pp->c[k], coefs->gamma * sqrt(pp->N * pp->N * pp->b[k] / pp->tau_max));
+            l++;
+        }
+    }
+    fclose(hist);
+    fclose(thr);
+}
+
+// void pri_1_step_6(struct pri_pars *pp)
+// {
+//     pp->n++;
+//     if(pp->n <= pp->N - 1)
+//         pri_1_step_2(pp);
+// }
+//
+// void pri_1_step_5(struct pri_pars *pp)
+// {
+//     pp->m--;
+//     if (pp->m < 0)
+//         pri_1_step_6(pp);
+//     else
+//         pri_1_step_3(pp);
+// }
+//
+// void pri_1_step_3(struct pri_pars *pp)
+// {
+//     pp->tau = pp->t[pp->n] - pp->t[pp->m];
+//     pp->tau_min = 1;
+//     pp->tau_max = pp->t_max - pp->t_min;
+//     pp->b = (pp->tau_max - pp->tau_min) / pp->K_k;
+//
+//     if(pp->b <= 0)
+//         pp->b = 1;
+//
+//     if ((pp->tau < pp->tau_min) || (pp->tau > MAXPSI)) {
+//         pri_1_step_5(pp);
+//         return;
+//     }
+//
+//     //шаг 4
+//     int k = 1;
+//     for(k = 1; k <= pp->K_k; k++) { // итеративно подбираем к
+//         double tau_k = (k - 0.5) / pp->K_k * (pp->tau_max - pp->tau_min) + pp->tau_min;
+//
+//         if((tau_k < pp->tau + pp->b/2) && (tau_k >= pp -> tau - pp->b/2)) { //проверка, что тау попадает в границы бина
+//             pp->D[k] += cos(2 * M_PI * (double)pp->t[pp->n] / pp->tau);
+//             pp->c[k]++;
+//             break;
+//         }
+//     }
+//
+//     // printf("\nt[%d] = %d    t[%d] = %d", pp->n, pp->t[pp->n], pp->m, pp->t[pp->m]);
+//     pri_1_step_5(pp);
+// }
+//
+// void pri_1_step_2(struct pri_pars *pp)
+// {
+//     pp->m = pp->n - 1;
+//     pri_1_step_3(pp);
+// }
+//
+// //ПCИ1 для const и stagger
+// void alg_pri_1(struct psi *psi, int *psis, struct coefs *coefs)
+// {
+//     struct pri_pars *pp = malloc(sizeof(struct pri_pars));
+//     pp->K_k = psi->toacount - 1;
+//     pp->N = psi->toacount;
+//     pp->t = malloc(sizeof(int) * pp->N);
+//     memcpy(pp->t, psi->toain, sizeof(int) * pp->N);
+//     pp->D = malloc(sizeof(double) * pp->K_k);
+//     memset(pp->D, 0, sizeof(double) * pp->K_k);
+//     pp->c = malloc(sizeof(int) * pp->K_k);
+//     memset(pp->c, 0, sizeof(int) * pp->K_k);
+//
+//     pp->t_max = pp->t[pp->K_k];
+//     pp->t_min = pp->t[0];
+//
+//     // начальные условия
+//     pp->k = 1;   // 1<=k<=K_k
+//     pp->n = 1;
+//
+//     pri_1_step_2(pp);
+//
+//     thresholds(pp, psis, coefs);
+//
+//     if(pp->t != NULL) {
+//         free(pp->t);
+//         pp->t = NULL;
+//     }
+//     if(pp->D != NULL) {
+//         free(pp->D);
+//         pp->D = NULL;
+//     }
+//     if(pp->c != NULL) {
+//         free(pp->c);
+//         pp->c = NULL;
+//     }
+//     if(pp != NULL) {
+//         free(pp);
+//         pp = NULL;
+//     }
+// }
+
+void pri_2_step_11(struct pri_pars *pp)
+{
+    //шаг 11
+    pp->m--;
+
+    if (pp->m >= 1)
+        pri_2_step_3(pp);
+    else { //шаг 12
+        pp->n++;
+        if(pp->n < pp->N)
+            pri_2_step_2(pp);
+    }
+}
+
+void pri_2_step_6(struct pri_pars *pp)
+{
+    if(pp->c[pp->k] == 0) {
+        pp->o[pp->k] = pp->t[pp->n];
+        // printf("\nПервое использование o[%d] = %d", pp->k, pp->o[pp->k]);
+    }
+
+    int z_0 = Z_0; // -0.5 < z_0 < 0.5 - можно вынести на совесть оператора
+    float nyu_0 = 0, nyu = 0;
+    double tau_k = (pp->k - 0.5) / pp->K_k * (pp->tau_max - pp->tau_min) + pp->tau_min;
+
+    if(tau_k < MINPSI || tau_k > MAXPSI) {
+        printf("\nнедопустимое значение %lf", tau_k);
+        return;
+    }
+
+    f++;
+    printf("\nf = %d, n = %d,  m = %d,  k = %d", f, pp->n, pp->m, pp->k);
+
+    // шаг 7
+    if(tau_k != 0)
+        nyu_0 = ((double)pp->t[pp->n] - (double)pp->o[pp->k]) / tau_k;
+    float v = (nyu_0 + 0.5);
+    float z = nyu_0 / v - 1;
+
+
+    // шаг 8
+    if((v == 1 && pp->t[pp->m] == pp->o[pp->k]) || (v >= 2 && abs(z) <= z_0)) {
+        pp->o[pp->k] = pp->t[pp->n];
+        // printf("\no[%d] = %d", pp->k, pp->o[pp->k]);
+    }
+
+    // // шаг 9
+    if(tau_k != 0)
+        nyu = (pp->t[pp->n] - pp->o[pp->k]) / tau_k;
+
+    // printf("\nm = %d    n = %d  pp->o[%d] = %d", pp->m, pp->n, pp->k, pp->o[pp->k]);
+    // printf("\nt[%d] = %d    t[%d] = %d", pp->m, pp->t[pp->m], pp->n, pp->t[pp->n]);
+    // шаг 10
+    if(pp->k > 0 && pp->k < pp->K_k) {
+        pp->D[pp->k] += cos(2 * PI * (double)nyu);
+        pp->c[pp->k]++;
+        // printf("\nD[%d] = %lf   c = %d", pp->k, pp->D[pp->k], pp->c[pp->k]);
+        // printf("\nc[%d] = %d", pp->k, pp->c[pp->k]);
+    }
+
+    // pri_2_step_11(pp);
+}
+
+void pri_2_step_5(struct pri_pars *pp, int k_1, int k_2)
+{
+    //проверки k
+    if(k_1 < 1)
+        k_1 = 1;
+    if(k_2 >= pp->K_k)
+        k_2 = pp->K_k - 1;
+    if(k_1 > k_2)
+        return;
+    for(pp->k = k_1; pp->k <= k_2; pp->k++) {
+        pri_2_step_6(pp);
+    }
+
+    //сглаживание
+    // for(int i = 2; i <  pp->K_k - 2; i++)
+    //     pp->D[i] = 0.2 * (abs(pp->D[i-2]) + abs(pp->D[i-1]) + abs(pp->D[i]) + abs(pp->D[i+1]) + abs(pp->D[i+2]));
+}
+
+void pri_2_step_3(struct pri_pars *pp)
+{
+    float vob = VOBUL;
+    int k_1 = 0, k_2 = 0;
+    pp->tau = pp->t[pp->n] - pp->t[pp->m];
+
+    if(pp->tau <= (1 - vob) * pp->tau_min) {
+        pri_2_step_5(pp, k_1, k_2);
+        // return;
+    }
+    else if(pp->tau > (1 + vob) * pp->tau_max) {
+        pri_2_step_6(pp);
+        // return;
+    }
+
+    // шаг 4
+    int delta_tau = (pp->tau_max - pp->tau_min) / pp->K_k;
+    if(delta_tau != 0) {
+        k_1 = ((pp->tau/(1 + vob) - pp->tau_min) / delta_tau) + 1;
+        k_2 = ((pp->tau/(1 - vob) - pp->tau_min) / delta_tau) + 1;
+    }
+
+    // printf("\n\nk1 = %d   k2 = %d", k_1, k_2);
+    // printf("\nn = %d    m = %d  pp->[%d] = %d   pp->[%d] = %d", pp->n, pp->m, pp->n, pp->t[pp->n], pp->m, pp->t[pp->m]);
+    // printf("\ntau_min = %d  tau_max = %d    pp->tau = %d", pp->tau_min, pp->tau_max, pp->tau);
+    // printf("\n(1 - vob) * pp->tau_min = %f\n(1 + vob) * pp->tau_max = %f", (1 - vob) * pp->tau_min, (1 + vob) * pp->tau_max);
+
+
+    pp->b[pp->k] = 2 * vob * pp->tau;
+
+    pri_2_step_5(pp, k_1, k_2);
+    pri_2_step_11(pp);
+}
+
+void pri_2_step_2(struct pri_pars *pp)
+{
+    pp->m = pp->n - 1;
+    pri_2_step_3(pp);
+}
+
+//ПCИ2 для jitter
+void alg_pri_2(struct psi *psi, int *psis, struct coefs *coefs)
+{
+    struct pri_pars *pp = malloc(sizeof(struct pri_pars));
+    pp->K_k = psi->toacount - 1;
+    pp->N = psi->toacount;
+    pp->t = malloc(sizeof(int) * pp->N);
+    memcpy(pp->t, psi->toain, sizeof(int) * pp->N);
+    pp->D = malloc(sizeof(double) * pp->K_k);
+    memset(pp->D, 0, sizeof(double) * pp->K_k);
+    pp->c = malloc(sizeof(int) * pp->K_k);
+    memset(pp->c, 0, sizeof(int) * pp->K_k);
+    pp->o = malloc(sizeof(int) * pp->K_k);
+    memset(pp->o, 0, sizeof(int) * pp->K_k);
+    pp->b = malloc(sizeof(float) * pp->K_k);
+    memset(pp->b, 0, sizeof(float) * pp->K_k);
+
+
+    // начальные условия
+    pp->k = 1;   // 1<=k<=K_k
+    pp->n = 1;
+
+    pp->tau_min = MINPSI;   // задаются оператором
+    pp->tau_max = MAXPSI;
+
+    pp->T = pp->t[pp->K_k] - pp->t[0];
+
+    pri_2_step_2(pp);
+
+    thresholds(pp, psis, coefs);
+
+    if(pp->t != NULL) {
+        free(pp->t);
+        pp->t = NULL;
+    }
+    if(pp->D != NULL) {
+        free(pp->D);
+        pp->D = NULL;
+    }
+    if(pp->c != NULL) {
+        free(pp->c);
+        pp->c = NULL;
+    }
+    if(pp->o != NULL) {
+        free(pp->o);
+        pp->o = NULL;
+    }
+    if(pp->b != NULL) {
+        free(pp->b);
+        pp->b = NULL;
+    }
+    if(pp != NULL) {
+        free(pp);
+        pp = NULL;
+    }
+}
+
+int main()
+{   struct pool *pool = poolalloc(1<<17);
+    if (!pool)
+        logfatal("poolalloc");
+    struct psi *psi = psialloc(pool, PULSEDETECTCOUNT);
+    if (!psi)
+        logfatal("prpalloc");
+
+    struct coefs *coefs = malloc(sizeof(int)*3);
+    memset(coefs, 0, sizeof(int)*3);
+    coefs->alpha = ALPHA;
+    coefs->beta = BETA;
+    coefs->gamma = GAMMA;
+    int psis[50]; // массив для значений ПCИ
+
+    mvpgen(psi);
+    printf("\na = %f    b = %f  gamma = %f", coefs->alpha, coefs->beta, coefs->gamma);
+    printf("\nРеальные ППИ: %d  %d\n", PSI1, PSI2);
+
+    // alg_pri_1(psi, psis, coefs);
+    alg_pri_2(psi, psis, coefs);
+
+    poolfree(pool);
+    printf("\nStatus: ok\n");
+}
+
+
