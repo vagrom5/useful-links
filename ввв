@@ -1,0 +1,21 @@
+make                                
+gcc -c src/possample.c -o obj/possample.o -g -MMD -Isrc         
+gcc -c src/jjson.c -o obj/jjson.o -g -MMD -Isrc                 
+gcc -c src/json.c -o obj/json.o -g -MMD -Isrc                   
+gcc -c src/jread.c -o obj/jread.o -g -MMD -Isrc                 
+gcc -c src/fft.c -o obj/fft.o -g -MMD -Isrc                     
+gcc -c src/gen.c -o obj/gen.o -g -MMD -Isrc                     
+gcc obj/possample.o obj/jjson.o obj/json.o obj/jread.o obj/fft.o
+ obj/gen.o -o possample -Isrc -lm                               
+/usr/bin/ld: obj/jjson.o: в функции «json_decode»:              
+/home/gromov/work/possig/src/json.c:362: повторное определение «
+json_decode»; obj/possample.o:/home/gromov/work/possig/src/json.
+c:362: здесь первое определение                                 
+/usr/bin/ld: obj/jjson.o: в функции «json_delete»:              
+/home/gromov/work/possig/src/json.c:408: повторное определение «
+json_delete»; obj/possample.o:/home/gromov/work/possig/src/json.
+c:408: здесь первое определение                                 
+/usr/bin/ld: obj/jjson.o: в функции «json_encode»:              
+/home/gromov/work/possig/src/json.c:380: повторное определение «
+json_encode»; obj/possample.o:/home/gromov/work/possig/src/json.
+c:380: здесь первое определение                
